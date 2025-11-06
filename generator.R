@@ -7,47 +7,56 @@ suppressPackageStartupMessages({
   library(text2vec)
 })
 
-cat("\n", strrep("=", 70), "\n")
-cat("EXECUTIVE ORDERS RETRIEVAL SYSTEM\n")
-cat(strrep("=", 70), "\n\n")
-
 CONFIG <- list(
   max_chunk_words = 500,
   download_retries = 3,
   download_sleep = 0.5
 )
 
-progress_bar <- function(current, total, width = 50) {
-  pct <- current / total
-  filled <- round(width * pct)
-  bar <- paste0("[", strrep("#", filled), strrep("-", width - filled), 
-                "] ", sprintf("%3.0f%%", pct * 100))
-  cat("\r", bar, sep = "")
-  if (current == total) cat("\n")
-  flush.console()
-}
+### Ingesting the text from .pdf format caused periodic appearance of garbled text in the final product. I tried to overcome this by ingesting the .html format instead,
+### but the website blocked me at the pass. There may be an API, but instead I stayed on the .pdf ingestion route and exposed Claude and GPT-5 to several iterations until
+### it gave me a working solution which is in the code block below. My objective was to have the UI retrieve and display the original text to the user in order to establish
+### credibility/transparency for the retrieval system. 
 
 fix_mojibake <- function(text) {
+  ### Function only operates on vector with type character
   if (!is.character(text)) return(text)
+  ## Force conversion to UTF-8 encoding
   text <- enc2utf8(text)
+  ## Remove soft hyphen that can interfere with word matching
   text <- gsub("\u00AD", "", text)
+  ## Remove zero width characters - space, non-joiner, joiner, word joiner and use upgraded Perl-compatible regular expressions over R base regex engine
   text <- gsub("[\u200B\u200C\u200D\u2060]", "", text, perl = TRUE)
+  ## Remove byte order marks (invisible character at start of text files to dictate encoding type) if they are there
   text <- gsub("\uFEFF", "", text)
+  ## Replace EM dash with hyphen and force R to match the actual byte codes in lieu of the unicode character 
   text <- gsub("\xe2\x80\x93", "-", text, useBytes = TRUE)
+  ## Replace EN dash with hyphen
   text <- gsub("\xe2\x80\x94", "-", text, useBytes = TRUE)
+  ## Replace curly left single quote with straight single quote
   text <- gsub("\xe2\x80\x98", "'", text, useBytes = TRUE)
+  ## Replace curly right single quote with straight single quote
   text <- gsub("\xe2\x80\x99", "'", text, useBytes = TRUE)
+  ## Replace curly left double quote with straight double quote
   text <- gsub("\xe2\x80\x9c", '"', text, useBytes = TRUE)
+  ## Replace curly right double quote with straight double quote
   text <- gsub("\xe2\x80\x9d", '"', text, useBytes = TRUE)
+  ## Replace ellipsis with three periods
   text <- gsub("\xe2\x80\xa6", "...", text, useBytes = TRUE)
+  ## After several trial and error iterations Claude recommended leave UTF-8 for ASCII and drop out anything that does not convert
   text <- iconv(text, from = "UTF-8", to = "ASCII//TRANSLIT", sub = "")
   text
 }
 
 dehyphenate <- function(text) {
+  ## Operates only on character vectors
   if (!is.character(text)) return(text)
+  ## Fix hyphenated line breaks with newline, seek pattern letter followed by optional space followed by linebreak followed by optional space followed by letter
+  ## replace with two letters concatenated 
   text <- gsub("([A-Za-z])-\\s*\n\\s*([A-Za-z])", "\\1\\2", text, perl = TRUE)
+  ## Fix hyphenated linebreaks without new line, similar pattern as above but without newline and same replacement
   text <- gsub("([A-Za-z])-\\s{1,2}([A-Za-z])", "\\1\\2", text, perl = TRUE)
+  ## If a word is split with a linebreak a space is inserted between the two words vice newline - may improve search functionality
   text <- gsub("([a-z])\n([a-z])", "\\1 \\2", text)
   text
 }
@@ -56,43 +65,23 @@ count_tokens <- function(text) {
   round(str_count(text, "\\S+") * 1.3)
 }
 
-cat("Step 1: Validating metadata...\n")
-
-if (!file.exists("metadata.csv")) {
-  stop("metadata.csv not found")
-}
-
+## Downloaded initial assignment dataframe as metadata.csv, read in all the columns as type character 
 meta <- read_csv("metadata.csv", show_col_types = FALSE, col_types = cols(.default = "c"))
-
-required_cols <- c("pdf_url", "executive_order_number", "title", "signing_date")
-missing_cols <- setdiff(required_cols, names(meta))
-
-if (length(missing_cols) > 0) {
-  stop(glue("metadata.csv missing columns: {paste(missing_cols, collapse = ', ')}"))
-}
 
 meta <- meta %>%
   mutate(
     executive_order_number = as.numeric(executive_order_number),
     signing_date = as.Date(signing_date, format = "%Y-%m-%d")
-  ) %>%
-  filter(!is.na(pdf_url), !is.na(executive_order_number)) %>%
-  distinct(executive_order_number, .keep_all = TRUE)
-
-cat(glue("Found {nrow(meta)} Executive Orders\n\n"))
-
-cat("Step 2: Setting up directories...\n")
-
+  ) 
+  
 dirs <- c("executive_orders_pdf", "executive_orders_txt", "executive_orders_cleaned")
-for (d in dirs) dir.create(d, showWarnings = FALSE, recursive = TRUE)
-
-cat("Directories ready\n\n")
-
-cat("Step 3: Downloading and extracting PDFs...\n")
+for (d in dirs) dir.create(d, showWarnings = FALSE)
 
 download_with_retry <- function(url, dest, retries = CONFIG$download_retries) {
   for (i in 1:retries) {
+    ## result gets loaded with numeric value 0 if download is a success, otherwise a try-error object containing the error message
     result <- try(download.file(url, dest, mode = "wb", quiet = TRUE), silent = TRUE)
+    ## if all three conditions are met then move on to the next one, otherwise expend remaining tries, otherwise kill the loop
     if (!inherits(result, "try-error") && file.exists(dest) && file.size(dest) > 0) {
       return(TRUE)
     }
@@ -100,6 +89,8 @@ download_with_retry <- function(url, dest, retries = CONFIG$download_retries) {
   }
   FALSE
 }
+
+### Use pdftools to extract text from PDF, save to .txt file, return TRUE if successful, FALSE otherwise. Don't re-download if .txt file already exists and is non-zero size.
 
 extract_pdf_text <- function(eo_number, pdf_url) {
   pdf_path <- file.path("executive_orders_pdf", glue("EO_{eo_number}.pdf"))
@@ -122,25 +113,12 @@ extract_pdf_text <- function(eo_number, pdf_url) {
   TRUE
 }
 
-success_count <- 0
-for (i in 1:nrow(meta)) {
-  row <- meta[i, ]
-  if (extract_pdf_text(row$executive_order_number, row$pdf_url)) {
-    success_count <- success_count + 1
-  }
-  progress_bar(i, nrow(meta))
-  Sys.sleep(0.1)
-}
-
-cat(glue("Extracted {success_count}/{nrow(meta)} EOs\n\n"))
-
-cat("Step 4: Cleaning text...\n")
-
 clean_text <- function(raw_text) {
   text <- raw_text
   text <- fix_mojibake(text)
   text <- dehyphenate(text)
   
+## Remove clutter that consistently appears on their own lines throughout the documents
   patterns <- c(
     "^.*verdate.*$", "^.*billing code.*$", "^.*\\[fr doc.*$",
     "^.*filed \\d.*$", "^.*_prezdoc.*$", "^.*presidential documents.*$"
@@ -150,64 +128,65 @@ clean_text <- function(raw_text) {
     text <- str_remove_all(text, regex(pat, multiline = TRUE, ignore_case = TRUE))
   }
   
+  ## Take out the headers - remove everything from federal register to presidential documents
   text <- str_remove_all(text, regex("federal register.*?presidential documents", 
                                      ignore_case = TRUE, dotall = TRUE))
+  ## Using word boundary pattern to find isolated dates that are not discussed inside the EO text - good candidates for removal                                  
   text <- str_remove_all(text, "\\b\\d{2}[a-z]{3}\\d{1,2}\\b")
+  ## Remove number sequences four to six digits that appear on their own lines
   text <- str_remove_all(text, regex("^\\s*\\d{4,6}\\s*$", multiline = TRUE))
+  ## Target date lines that appear below THE WHITE HOUSE.
   text <- str_remove_all(text, regex("[a-z]+day,\\s*[a-z]+\\s*\\d+,\\s*\\d{4}", 
                                      ignore_case = TRUE))
+  ## I used an LLM to inspect the extracted text from the PDFs... Even though not visually present in the PDFs the post-extraction raw text manifested odd codes with
+  ## jkt, po, frm, fmt, and sfmt patterns that were tainting the corpus 
   text <- str_remove_all(text, regex("jkt\\s+\\d+|po\\s+\\d+|frm\\s+\\d+|fmt\\s+\\d+|sfmt\\s+\\d+", 
                                      ignore_case = TRUE))
+  ## Remove any trailing THE WHITE HOUSE lines with year at the end of the document                                   
   text <- str_remove_all(text, regex("the white house.*?\\d{4}", ignore_case = TRUE))
-  
+  ## Remove blocks of white space greater than three lines  
   text <- str_replace_all(text, "\\n{3,}", "\n\n")
+  ## Normalize spaces and tabs to single space
   text <- str_replace_all(text, "[ \\t]+", " ")
+  ## Remove leading and trailing whitespace
   text <- str_trim(text)
   
   fix_mojibake(text)
 }
 
-txt_files <- list.files("executive_orders_txt", "^EO_\\d+\\.txt$", full.names = TRUE)
-cleaned_count <- 0
-
-for (i in seq_along(txt_files)) {
-  raw <- read_file(txt_files[i])
-  cleaned <- clean_text(raw)
-  out_path <- file.path("executive_orders_cleaned",
-                        str_replace(basename(txt_files[i]), "\\.txt$", "_cleaned.txt"))
-  write_file(cleaned, out_path)
-  cleaned_count <- cleaned_count + 1
-  progress_bar(i, length(txt_files))
-}
-
-cat(glue("Cleaned {cleaned_count} files\n\n"))
-
-cat("Step 5: Chunking documents...\n")
-
 chunk_document <- function(text_original, eo_number) {
   text_cleaned <- str_to_lower(text_original)
   
+## Keeping the original text for display purposes later. Split words based on any whitespace 
+
   words_original <- str_split(text_original, "\\s+")[[1]]
   words_cleaned <- str_split(text_cleaned, "\\s+")[[1]]
-  
+
+## If the two vectors do not have the same length, then truncate to the shorter length to maintain alignment
+
   if (length(words_cleaned) != length(words_original)) {
     min_len <- min(length(words_cleaned), length(words_original))
     words_cleaned <- words_cleaned[1:min_len]
     words_original <- words_original[1:min_len]
   }
-  
+## Use tokenize_sentences from the tokenizers package to split cleaned text into sentences
   sentences <- tokenize_sentences(text_cleaned, strip_punct = FALSE, lowercase = FALSE)[[1]]
   
   if (length(sentences) == 0) return(tibble())
-  
+
+## Build list of chunks using sentence boundaries, but do not exceed 500 words.
+
   chunks <- list()
   current_chunk <- NULL
   word_pos <- 1
   
   for (sent in sentences) {
+## Count words which we define here as tokens that are not spaces/whitespace 
     sent_word_count <- str_count(sent, "\\S+")
+## If no words in there do not pack it into a chunk
     if (sent_word_count == 0) next
-    
+## Continue iterating over each sentence and adding to the current chunk until max words is exceeded at 500. If the next sentence trips the 500 word limit
+## then the chunk will be packed with the last completed sentence and the next sentence will start a new chunk. 
     if (is.null(current_chunk)) {
       current_chunk <- list(start = word_pos, end = word_pos + sent_word_count - 1,
                             word_count = sent_word_count)
@@ -222,11 +201,15 @@ chunk_document <- function(text_original, eo_number) {
     
     word_pos <- word_pos + sent_word_count
   }
-  
+## Pack the last chunk since it likely did not exceed the trip limit  
   if (!is.null(current_chunk)) {
     chunks[[length(chunks) + 1]] <- current_chunk
   }
-  
+
+### Use map2_dfr fxn from purrr to iterate over chunks and build a dataframe with original and cleaned text for each chunk. seq_along used to generate chunk_id.
+### Also count words and tokens for each chunk. map2_dfr takes two inputs - chunks list and sequence of indices, applies the function to each pair, 
+### and combines results into a dataframe. 
+
   map2_dfr(chunks, seq_along(chunks), function(chunk, idx) {
     start_idx <- chunk$start
     end_idx <- min(chunk$end, length(words_cleaned))
@@ -249,13 +232,17 @@ chunk_document <- function(text_original, eo_number) {
 cleaned_files <- list.files("executive_orders_cleaned", "_cleaned\\.txt$", full.names = TRUE)
 chunks_list <- list()
 
+### For every .txt file in the cleaned directory, extract the EO number from the filename, read in the text, chunk it, and store the resulting dataframe in a list.
+### Ensure we only include dataframes with more than zero rows to avoid errors during binding.
+
 for (i in seq_along(cleaned_files)) {
   eo_num <- str_extract(basename(cleaned_files[i]), "\\d+")
   text_orig <- read_file(cleaned_files[i])
   chunks <- chunk_document(text_orig, eo_num)
   if (nrow(chunks) > 0) chunks_list[[eo_num]] <- chunks
-  progress_bar(i, length(cleaned_files))
 }
+
+### Combine all chunk dataframes into a single dataframe
 
 chunks_df <- bind_rows(chunks_list)
 
@@ -268,10 +255,6 @@ chunks_final <- chunks_df %>%
          text_original, text, word_count, token_count)
 
 write_csv(chunks_final, "eo_chunks_final.csv")
-
-cat(glue("Created {nrow(chunks_final)} chunks from {n_distinct(chunks_final$eo_number)} EOs\n\n"))
-
-cat("Step 6: Building search index...\n")
 
 tokens <- word_tokenizer(chunks_final$text)
 it <- itoken(tokens, progressbar = FALSE)
@@ -837,14 +820,3 @@ window.addEventListener("DOMContentLoaded", initializeApp);
 
 close(html_conn)
 
-file_size <- file.size(html_file) / 1024 / 1024
-cat(glue("Generated {html_file} ({round(file_size, 2)} MB)\n\n"))
-
-date_range <- range(chunks_final$signing_date, na.rm = TRUE)
-
-cat(strrep("=", 70), "\n")
-cat("COMPLETE\n")
-cat(strrep("=", 70), "\n\n")
-cat(glue("Chunks: {nrow(chunks_final)} from {n_distinct(chunks_final$eo_number)} EOs\n"))
-cat(glue("Date range: {date_range[1]} to {date_range[2]}\n"))
-cat(glue("Output: {html_file}\n\n"))
