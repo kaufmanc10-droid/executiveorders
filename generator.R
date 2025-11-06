@@ -1,17 +1,3 @@
-# ============================================================================
-# EXECUTIVE ORDERS RETRIEVAL SYSTEM - COMPLETE PIPELINE
-# Single-script solution: PDF -> Text -> Chunks -> Self-Contained HTML UI
-# 
-# What this does:
-# 1. Downloads EO PDFs from metadata.csv
-# 2. Extracts and cleans text
-# 3. Creates dual-text chunks (original + lowercase)
-# 4. Builds TF-IDF index
-# 5. Generates beautiful self-contained HTML with embedded data
-# 
-# Output: EO_Retrieval_System.html (submit this to Canvas!)
-# ============================================================================
-
 suppressPackageStartupMessages({
   library(tidyverse)
   library(pdftools)
@@ -21,174 +7,59 @@ suppressPackageStartupMessages({
   library(text2vec)
 })
 
-cat("\n")
-cat(strrep("=", 70), "\n")
-cat("EXECUTIVE ORDERS RETRIEVAL SYSTEM - FULL PIPELINE\n")
+cat("\n", strrep("=", 70), "\n")
+cat("EXECUTIVE ORDERS RETRIEVAL SYSTEM\n")
 cat(strrep("=", 70), "\n\n")
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
 CONFIG <- list(
-  target_chunk_words = 400,
   max_chunk_words = 500,
-  max_chunk_words_split = 800,
   download_retries = 3,
-  download_sleep = 0.5,
-  top_n_results = 3
+  download_sleep = 0.5
 )
 
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================
-
-# Progress bar
 progress_bar <- function(current, total, width = 50) {
   pct <- current / total
   filled <- round(width * pct)
-  bar <- paste0(
-    "[", 
-    strrep("#", filled), 
-    strrep("-", width - filled), 
-    "] ", 
-    sprintf("%3.0f%%", pct * 100)
-  )
+  bar <- paste0("[", strrep("#", filled), strrep("-", width - filled), 
+                "] ", sprintf("%3.0f%%", pct * 100))
   cat("\r", bar, sep = "")
   if (current == total) cat("\n")
   flush.console()
 }
 
-# Mojibake fixer (enhanced version)
-# Mojibake fixer (safe version - no problematic characters)
 fix_mojibake <- function(text) {
   if (!is.character(text)) return(text)
   text <- enc2utf8(text)
-  
-  # Remove invisible/problematic characters
   text <- gsub("\u00AD", "", text)
   text <- gsub("[\u200B\u200C\u200D\u2060]", "", text, perl = TRUE)
   text <- gsub("\uFEFF", "", text)
-  
-  # Fix mojibake using hex patterns (safe for copy-paste)
-  text <- gsub("\xe2\x80\x93", "-", text, useBytes = TRUE)  # en dash
-  text <- gsub("\xe2\x80\x94", "-", text, useBytes = TRUE)  # em dash
-  text <- gsub("\xe2\x80\x98", "'", text, useBytes = TRUE)  # left quote
-  text <- gsub("\xe2\x80\x99", "'", text, useBytes = TRUE)  # right quote
-  text <- gsub("\xe2\x80\x9c", '"', text, useBytes = TRUE)  # left double quote
-  text <- gsub("\xe2\x80\x9d", '"', text, useBytes = TRUE)  # right double quote
-  text <- gsub("\xe2\x80\xa6", "...", text, useBytes = TRUE)  # ellipsis
-  
-  # Remove any remaining problem bytes
+  text <- gsub("\xe2\x80\x93", "-", text, useBytes = TRUE)
+  text <- gsub("\xe2\x80\x94", "-", text, useBytes = TRUE)
+  text <- gsub("\xe2\x80\x98", "'", text, useBytes = TRUE)
+  text <- gsub("\xe2\x80\x99", "'", text, useBytes = TRUE)
+  text <- gsub("\xe2\x80\x9c", '"', text, useBytes = TRUE)
+  text <- gsub("\xe2\x80\x9d", '"', text, useBytes = TRUE)
+  text <- gsub("\xe2\x80\xa6", "...", text, useBytes = TRUE)
   text <- iconv(text, from = "UTF-8", to = "ASCII//TRANSLIT", sub = "")
-  
   text
 }
 
-# Enhanced cleaning function
-clean_text <- function(raw_text) {
-  text <- raw_text
-  
-  # Apply mojibake fixes FIRST
-  text <- fix_mojibake(text)
-  text <- dehyphenate(text)
-  
-  # Remove metadata lines
-  patterns <- c(
-    "^.*verdate.*$", "^.*billing code.*$", "^.*\\[fr doc.*$",
-    "^.*filed \\d.*$", "^.*_prezdoc.*$", "^.*presidential documents.*$"
-  )
-  
-  for (pat in patterns) {
-    text <- str_remove_all(text, regex(pat, multiline = TRUE, ignore_case = TRUE))
-  }
-  
-  # Remove various artifacts
-  text <- str_remove_all(text, regex("federal register.*?presidential documents", 
-                                     ignore_case = TRUE, dotall = TRUE))
-  text <- str_remove_all(text, "\\b\\d{2}[a-z]{3}\\d{1,2}\\b")
-  text <- str_remove_all(text, regex("^\\s*\\d{4,6}\\s*$", multiline = TRUE))
-  text <- str_remove_all(text, regex("[a-z]+day,\\s*[a-z]+\\s*\\d+,\\s*\\d{4}", 
-                                     ignore_case = TRUE))
-  text <- str_remove_all(text, regex("jkt\\s+\\d+|po\\s+\\d+|frm\\s+\\d+|fmt\\s+\\d+|sfmt\\s+\\d+", 
-                                     ignore_case = TRUE))
-  text <- str_remove_all(text, regex("the white house.*?\\d{4}", ignore_case = TRUE))
-  
-  # Clean whitespace
-  text <- str_replace_all(text, "\\n{3,}", "\n\n")
-  text <- str_replace_all(text, "[ \\t]+", " ")
-  text <- str_trim(text)
-  
-  # Final mojibake pass
-  text <- fix_mojibake(text)
-  
-  text
-}
-
-# Enhanced cleaning function
-clean_text <- function(raw_text) {
-  text <- raw_text
-  
-  # Apply mojibake fixes FIRST
-  text <- fix_mojibake(text)
-  text <- dehyphenate(text)
-  
-  # Remove metadata lines
-  patterns <- c(
-    "^.*verdate.*$", "^.*billing code.*$", "^.*\\[fr doc.*$",
-    "^.*filed \\d.*$", "^.*_prezdoc.*$", "^.*presidential documents.*$"
-  )
-  
-  for (pat in patterns) {
-    text <- str_remove_all(text, regex(pat, multiline = TRUE, ignore_case = TRUE))
-  }
-  
-  # Remove various artifacts
-  text <- str_remove_all(text, regex("federal register.*?presidential documents", 
-                                     ignore_case = TRUE, dotall = TRUE))
-  text <- str_remove_all(text, "\\b\\d{2}[a-z]{3}\\d{1,2}\\b")
-  text <- str_remove_all(text, regex("^\\s*\\d{4,6}\\s*$", multiline = TRUE))
-  text <- str_remove_all(text, regex("[a-z]+day,\\s*[a-z]+\\s*\\d+,\\s*\\d{4}", 
-                                     ignore_case = TRUE))
-  text <- str_remove_all(text, regex("jkt\\s+\\d+|po\\s+\\d+|frm\\s+\\d+|fmt\\s+\\d+|sfmt\\s+\\d+", 
-                                     ignore_case = TRUE))
-  text <- str_remove_all(text, regex("the white house.*?\\d{4}", ignore_case = TRUE))
-  
-  # Clean whitespace
-  text <- str_replace_all(text, "\\n{3,}", "\n\n")
-  text <- str_replace_all(text, "[ \\t]+", " ")
-  text <- str_trim(text)
-  
-  # Final mojibake pass after all cleaning
-  text <- fix_mojibake(text)
-  
-  text
-}
-# Dehyphenate
 dehyphenate <- function(text) {
   if (!is.character(text)) return(text)
-  # Merge hyphenated words across line breaks
   text <- gsub("([A-Za-z])-\\s*\n\\s*([A-Za-z])", "\\1\\2", text, perl = TRUE)
-  # Merge hyphenated words with spaces
   text <- gsub("([A-Za-z])-\\s{1,2}([A-Za-z])", "\\1\\2", text, perl = TRUE)
-  # Join broken lines
   text <- gsub("([a-z])\n([a-z])", "\\1 \\2", text)
   text
 }
 
-# Token estimator
 count_tokens <- function(text) {
   round(str_count(text, "\\S+") * 1.3)
 }
 
-# ============================================================================
-# STEP 1: VALIDATE METADATA
-# ============================================================================
-
 cat("Step 1: Validating metadata...\n")
 
 if (!file.exists("metadata.csv")) {
-  stop("ERROR: metadata.csv not found. Please ensure it's in your working directory.")
+  stop("metadata.csv not found")
 }
 
 meta <- read_csv("metadata.csv", show_col_types = FALSE, col_types = cols(.default = "c"))
@@ -197,7 +68,7 @@ required_cols <- c("pdf_url", "executive_order_number", "title", "signing_date")
 missing_cols <- setdiff(required_cols, names(meta))
 
 if (length(missing_cols) > 0) {
-  stop(glue("ERROR: metadata.csv missing columns: {paste(missing_cols, collapse = ', ')}"))
+  stop(glue("metadata.csv missing columns: {paste(missing_cols, collapse = ', ')}"))
 }
 
 meta <- meta %>%
@@ -208,24 +79,14 @@ meta <- meta %>%
   filter(!is.na(pdf_url), !is.na(executive_order_number)) %>%
   distinct(executive_order_number, .keep_all = TRUE)
 
-cat(glue("SUCCESS: Found {nrow(meta)} Executive Orders with valid URLs\n\n"))
-
-# ============================================================================
-# STEP 2: SETUP DIRECTORIES
-# ============================================================================
+cat(glue("Found {nrow(meta)} Executive Orders\n\n"))
 
 cat("Step 2: Setting up directories...\n")
 
 dirs <- c("executive_orders_pdf", "executive_orders_txt", "executive_orders_cleaned")
-for (d in dirs) {
-  dir.create(d, showWarnings = FALSE, recursive = TRUE)
-}
+for (d in dirs) dir.create(d, showWarnings = FALSE, recursive = TRUE)
 
-cat("SUCCESS: Directories ready\n\n")
-
-# ============================================================================
-# STEP 3: DOWNLOAD AND EXTRACT PDFs
-# ============================================================================
+cat("Directories ready\n\n")
 
 cat("Step 3: Downloading and extracting PDFs...\n")
 
@@ -244,37 +105,23 @@ extract_pdf_text <- function(eo_number, pdf_url) {
   pdf_path <- file.path("executive_orders_pdf", glue("EO_{eo_number}.pdf"))
   txt_path <- file.path("executive_orders_txt", glue("EO_{eo_number}.txt"))
   
-  # Check if already extracted
-  if (file.exists(txt_path) && file.size(txt_path) > 0) {
-    return(TRUE)
-  }
+  if (file.exists(txt_path) && file.size(txt_path) > 0) return(TRUE)
   
-  # Download if needed
   if (!file.exists(pdf_path) || file.size(pdf_path) == 0) {
-    if (!download_with_retry(pdf_url, pdf_path)) {
-      return(FALSE)
-    }
+    if (!download_with_retry(pdf_url, pdf_path)) return(FALSE)
   }
   
-  # Extract text
   text <- tryCatch({
     pages <- pdf_text(pdf_path)
-    if (length(pages) > 0) {
-      paste(pages, collapse = "\n\n")
-    } else {
-      NULL
-    }
+    if (length(pages) > 0) paste(pages, collapse = "\n\n") else NULL
   }, error = function(e) NULL)
   
-  if (is.null(text) || !nzchar(text)) {
-    return(FALSE)
-  }
+  if (is.null(text) || !nzchar(text)) return(FALSE)
   
   write_file(text, txt_path)
   TRUE
 }
 
-# Process all EOs
 success_count <- 0
 for (i in 1:nrow(meta)) {
   row <- meta[i, ]
@@ -282,23 +129,18 @@ for (i in 1:nrow(meta)) {
     success_count <- success_count + 1
   }
   progress_bar(i, nrow(meta))
-  Sys.sleep(0.1)  # Be nice to the server
+  Sys.sleep(0.1)
 }
 
-cat(glue("SUCCESS: Extracted {success_count}/{nrow(meta)} EOs\n\n"))
+cat(glue("Extracted {success_count}/{nrow(meta)} EOs\n\n"))
 
-# ============================================================================
-# STEP 4: CLEAN TEXT
-# ============================================================================
-
-cat("Step 4: Cleaning extracted text...\n")
+cat("Step 4: Cleaning text...\n")
 
 clean_text <- function(raw_text) {
   text <- raw_text
-  text <- dehyphenate(text)
   text <- fix_mojibake(text)
+  text <- dehyphenate(text)
   
-  # Remove metadata lines
   patterns <- c(
     "^.*verdate.*$", "^.*billing code.*$", "^.*\\[fr doc.*$",
     "^.*filed \\d.*$", "^.*_prezdoc.*$", "^.*presidential documents.*$"
@@ -308,7 +150,6 @@ clean_text <- function(raw_text) {
     text <- str_remove_all(text, regex(pat, multiline = TRUE, ignore_case = TRUE))
   }
   
-  # Remove various artifacts
   text <- str_remove_all(text, regex("federal register.*?presidential documents", 
                                      ignore_case = TRUE, dotall = TRUE))
   text <- str_remove_all(text, "\\b\\d{2}[a-z]{3}\\d{1,2}\\b")
@@ -319,12 +160,11 @@ clean_text <- function(raw_text) {
                                      ignore_case = TRUE))
   text <- str_remove_all(text, regex("the white house.*?\\d{4}", ignore_case = TRUE))
   
-  # Clean whitespace
   text <- str_replace_all(text, "\\n{3,}", "\n\n")
   text <- str_replace_all(text, "[ \\t]+", " ")
   text <- str_trim(text)
   
-  text
+  fix_mojibake(text)
 }
 
 txt_files <- list.files("executive_orders_txt", "^EO_\\d+\\.txt$", full.names = TRUE)
@@ -333,27 +173,20 @@ cleaned_count <- 0
 for (i in seq_along(txt_files)) {
   raw <- read_file(txt_files[i])
   cleaned <- clean_text(raw)
-  out_path <- file.path(
-    "executive_orders_cleaned",
-    str_replace(basename(txt_files[i]), "\\.txt$", "_cleaned.txt")
-  )
+  out_path <- file.path("executive_orders_cleaned",
+                        str_replace(basename(txt_files[i]), "\\.txt$", "_cleaned.txt"))
   write_file(cleaned, out_path)
   cleaned_count <- cleaned_count + 1
   progress_bar(i, length(txt_files))
 }
 
-cat(glue("SUCCESS: Cleaned {cleaned_count} text files\n\n"))
-
-# ============================================================================
-# STEP 5: CHUNK DOCUMENTS (WORD-LEVEL ALIGNMENT)
-# ============================================================================
+cat(glue("Cleaned {cleaned_count} files\n\n"))
 
 cat("Step 5: Chunking documents...\n")
 
 chunk_document <- function(text_original, eo_number) {
   text_cleaned <- str_to_lower(text_original)
   
-  # Split into words
   words_original <- str_split(text_original, "\\s+")[[1]]
   words_cleaned <- str_split(text_cleaned, "\\s+")[[1]]
   
@@ -363,14 +196,10 @@ chunk_document <- function(text_original, eo_number) {
     words_original <- words_original[1:min_len]
   }
   
-  # Tokenize sentences (using cleaned version)
   sentences <- tokenize_sentences(text_cleaned, strip_punct = FALSE, lowercase = FALSE)[[1]]
   
-  if (length(sentences) == 0) {
-    return(tibble())
-  }
+  if (length(sentences) == 0) return(tibble())
   
-  # Build chunks
   chunks <- list()
   current_chunk <- NULL
   word_pos <- 1
@@ -380,18 +209,12 @@ chunk_document <- function(text_original, eo_number) {
     if (sent_word_count == 0) next
     
     if (is.null(current_chunk)) {
-      current_chunk <- list(
-        start = word_pos,
-        end = word_pos + sent_word_count - 1,
-        word_count = sent_word_count
-      )
+      current_chunk <- list(start = word_pos, end = word_pos + sent_word_count - 1,
+                            word_count = sent_word_count)
     } else if (current_chunk$word_count + sent_word_count > CONFIG$max_chunk_words) {
       chunks[[length(chunks) + 1]] <- current_chunk
-      current_chunk <- list(
-        start = word_pos,
-        end = word_pos + sent_word_count - 1,
-        word_count = sent_word_count
-      )
+      current_chunk <- list(start = word_pos, end = word_pos + sent_word_count - 1,
+                            word_count = sent_word_count)
     } else {
       current_chunk$end <- word_pos + sent_word_count - 1
       current_chunk$word_count <- current_chunk$word_count + sent_word_count
@@ -404,7 +227,6 @@ chunk_document <- function(text_original, eo_number) {
     chunks[[length(chunks) + 1]] <- current_chunk
   }
   
-  # Extract text for each chunk
   map2_dfr(chunks, seq_along(chunks), function(chunk, idx) {
     start_idx <- chunk$start
     end_idx <- min(chunk$end, length(words_cleaned))
@@ -424,7 +246,6 @@ chunk_document <- function(text_original, eo_number) {
   })
 }
 
-# Process all cleaned files
 cleaned_files <- list.files("executive_orders_cleaned", "_cleaned\\.txt$", full.names = TRUE)
 chunks_list <- list()
 
@@ -432,34 +253,23 @@ for (i in seq_along(cleaned_files)) {
   eo_num <- str_extract(basename(cleaned_files[i]), "\\d+")
   text_orig <- read_file(cleaned_files[i])
   chunks <- chunk_document(text_orig, eo_num)
-  if (nrow(chunks) > 0) {
-    chunks_list[[eo_num]] <- chunks
-  }
+  if (nrow(chunks) > 0) chunks_list[[eo_num]] <- chunks
   progress_bar(i, length(cleaned_files))
 }
 
 chunks_df <- bind_rows(chunks_list)
 
-# Add metadata
 chunks_final <- chunks_df %>%
-  left_join(
-    meta %>% select(executive_order_number, title, signing_date),
-    by = c("eo_number" = "executive_order_number")
-  ) %>%
-  mutate(
-    title = coalesce(title, glue("Executive Order {eo_number}")),
-    title = fix_mojibake(title)
-  ) %>%
+  left_join(meta %>% select(executive_order_number, title, signing_date),
+            by = c("eo_number" = "executive_order_number")) %>%
+  mutate(title = coalesce(title, glue("Executive Order {eo_number}")),
+         title = fix_mojibake(title)) %>%
   select(doc_id, eo_number, chunk_id, title, signing_date, 
          text_original, text, word_count, token_count)
 
 write_csv(chunks_final, "eo_chunks_final.csv")
 
-cat(glue("SUCCESS: Created {nrow(chunks_final)} chunks from {n_distinct(chunks_final$eo_number)} EOs\n\n"))
-
-# ============================================================================
-# STEP 6: BUILD TF-IDF INDEX (for console testing)
-# ============================================================================
+cat(glue("Created {nrow(chunks_final)} chunks from {n_distinct(chunks_final$eo_number)} EOs\n\n"))
 
 cat("Step 6: Building search index...\n")
 
@@ -471,9 +281,8 @@ dtm <- create_dtm(it, vectorizer)
 tfidf_model <- TfIdf$new()
 dtm_tfidf <- tfidf_model$fit_transform(dtm)
 
-cat(glue("SUCCESS: Index built ({nrow(dtm_tfidf)} chunks x {ncol(dtm_tfidf)} terms)\n\n"))
+cat(glue("Index built ({nrow(dtm_tfidf)} chunks x {ncol(dtm_tfidf)} terms)\n\n"))
 
-# Console retrieval function
 retrieve_chunks <- function(query, top_n = 3) {
   if (!nzchar(query)) {
     cat("Empty query.\n")
@@ -503,20 +312,13 @@ retrieve_chunks <- function(query, top_n = 3) {
   invisible(results)
 }
 
-cat("SUCCESS: Console retrieval ready. Try: retrieve_chunks('energy policy')\n\n")
+cat("Console retrieval ready: retrieve_chunks('your query')\n\n")
 
-# ============================================================================
-# STEP 7: GENERATE SELF-CONTAINED HTML (ENHANCED VERSION)
-# ============================================================================
+cat("Step 7: Generating HTML...\n")
 
-cat("Step 7: Generating enhanced HTML interface...\n")
-
-# Prepare data for embedding (with PDF URLs)
 export_data <- chunks_final %>%
-  left_join(
-    meta %>% select(executive_order_number, pdf_url),
-    by = c("eo_number" = "executive_order_number")
-  ) %>%
+  left_join(meta %>% select(executive_order_number, pdf_url),
+            by = c("eo_number" = "executive_order_number")) %>%
   mutate(signing_date = as.character(signing_date)) %>%
   select(doc_id, eo_number, chunk_id, title, signing_date, 
          text_original, text, word_count, token_count, pdf_url)
@@ -524,7 +326,6 @@ export_data <- chunks_final %>%
 json_data <- toJSON(export_data, auto_unbox = TRUE, pretty = FALSE)
 json_base64 <- base64enc::base64encode(charToRaw(json_data))
 
-# Write HTML file
 html_file <- "EO_Retrieval_System.html"
 html_conn <- file(html_file, "w", encoding = "UTF-8")
 
@@ -560,7 +361,6 @@ body {
   box-shadow: 0 10px 30px rgba(0,0,0,0.2);
   margin-bottom: 30px;
 }
-.search-box h2 { margin-bottom: 20px; color: #333; }
 .toggle-container {
   display: flex;
   align-items: center;
@@ -570,11 +370,7 @@ body {
   background: #f8f9fa;
   border-radius: 8px;
 }
-.toggle-label {
-  font-weight: 600;
-  color: #333;
-  font-size: 1.1em;
-}
+.toggle-label { font-weight: 600; color: #333; font-size: 1.1em; }
 .toggle-switch {
   position: relative;
   width: 60px;
@@ -584,9 +380,7 @@ body {
   cursor: pointer;
   transition: background 0.3s;
 }
-.toggle-switch.active {
-  background: #667eea;
-}
+.toggle-switch.active { background: #667eea; }
 .toggle-switch::after {
   content: "";
   position: absolute;
@@ -598,19 +392,9 @@ body {
   border-radius: 50%;
   transition: transform 0.3s;
 }
-.toggle-switch.active::after {
-  transform: translateX(30px);
-}
-.mode-indicator {
-  font-size: 1.1em;
-  color: #667eea;
-  font-weight: 600;
-}
-.mode-description {
-  font-size: 0.9em;
-  color: #666;
-  font-style: italic;
-}
+.toggle-switch.active::after { transform: translateX(30px); }
+.mode-indicator { font-size: 1.1em; color: #667eea; font-weight: 600; }
+.mode-description { font-size: 0.9em; color: #666; font-style: italic; }
 .search-input-group { display: flex; gap: 10px; }
 .search-input {
   flex: 1;
@@ -676,15 +460,8 @@ body {
   font-weight: 600;
   flex: 1;
 }
-.result-title a {
-  color: #333;
-  text-decoration: none;
-  transition: color 0.3s;
-}
-.result-title a:hover {
-  color: #667eea !important;
-  text-decoration: underline !important;
-}
+.result-title a { color: #333; text-decoration: none; transition: color 0.3s; }
+.result-title a:hover { color: #667eea; text-decoration: underline; }
 .similarity-badge {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
@@ -725,25 +502,15 @@ body {
   border-radius: 15px;
   box-shadow: 0 10px 30px rgba(0,0,0,0.2);
 }
-.stats-box {
-  background: white;
-  padding: 30px;
-  border-radius: 15px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-  margin-top: 30px;
-}
-.stats-box h3 { color: #667eea; margin-bottom: 15px; }
-.stats-box p { color: #666; margin-bottom: 8px; }
 </style>
 </head>
 <body>
 <div class="container">
 <div class="header">
-  <h1>🔍 Executive Orders Retrieval System</h1>
-  <p id="dataset-info">Loading dataset...</p>
+  <h1>Executive Orders Retrieval System</h1>
+  <p id="dataset-info">Loading...</p>
 </div>
 <div class="search-box">
-  <h2>Search Configuration</h2>
   <div class="toggle-container">
     <span class="toggle-label">Search Mode:</span>
     <div id="toggleSwitch" class="toggle-switch" onclick="toggleSearchMode()"></div>
@@ -752,37 +519,21 @@ body {
   </div>
   <div class="search-input-group">
     <input type="text" id="searchInput" class="search-input" 
-           placeholder="e.g., immigration policy, energy subsidies, federal government..."
+           placeholder="e.g., immigration policy, energy subsidies..."
            onkeypress="if(event.key===\'Enter\') performSearch()">
     <button class="search-button" onclick="performSearch()">Search</button>
   </div>
   <div class="example-queries">
-    <strong style="color: #667eea;">Try these examples:</strong>
     <span class="example-query" onclick="setQuery(\'immigration policy\')">immigration policy</span>
     <span class="example-query" onclick="setQuery(\'energy subsidies\')">energy subsidies</span>
     <span class="example-query" onclick="setQuery(\'federal government\')">federal government</span>
     <span class="example-query" onclick="setQuery(\'tax credits\')">tax credits</span>
-    <span class="example-query" onclick="setQuery(\'national security\')">national security</span>
   </div>
 </div>
 <div id="resultsContainer"></div>
-<div class="stats-box">
-  <h3>About This System</h3>
-  <p><strong>Dataset:</strong> Trump Executive Orders (January-July 2025)</p>
-  <p><strong>Total Chunks:</strong> <span id="totalChunks">-</span></p>
-  <p><strong>Executive Orders:</strong> <span id="totalEOs">-</span></p>
-  <p><strong>Search Modes:</strong></p>
-  <p style="margin-left: 20px;">• TF-IDF: Semantic similarity using term frequency-inverse document frequency</p>
-  <p style="margin-left: 20px;">• Keyword: Exact word matching with frequency scoring</p>
-  <p><strong>Features:</strong></p>
-  <p style="margin-left: 20px;">• Click EO titles to view source PDF</p>
-  <p style="margin-left: 20px;">• Toggle search modes without re-searching</p>
-  <p><strong>Implementation:</strong> Pure JavaScript (no server required)</p>
-</div>
 </div>
 <script>', html_conn)
 
-# Embed data
 writeLines(glue('const CHUNKS_DATA_BASE64 = "{json_base64}";'), html_conn)
 
 writeLines('
@@ -953,7 +704,6 @@ function toggleSearchMode() {
     description.textContent = "(Semantic similarity)";
   }
   
-  // Auto-refresh search if there is a query
   const query = document.getElementById("searchInput").value.trim();
   if (query) {
     performSearch();
@@ -981,21 +731,16 @@ function highlightTerms(text, query) {
 
 function initializeApp() {
   if (CHUNKS_DATA.length === 0) {
-    document.getElementById("dataset-info").textContent = 
-      "ERROR: No data loaded. Please check the file.";
+    document.getElementById("dataset-info").textContent = "ERROR: No data loaded";
     document.querySelector(".search-button").disabled = true;
     return;
   }
   
-  console.log("Building TF-IDF index...");
   retriever = new TfIdfRetriever(CHUNKS_DATA);
-  console.log("Index built successfully");
   
   const uniqueEOs = new Set(CHUNKS_DATA.map(c => c.eo_number)).size;
   document.getElementById("dataset-info").textContent = 
-    `Search across ${CHUNKS_DATA.length} chunks from ${uniqueEOs} Executive Orders`;
-  document.getElementById("totalChunks").textContent = CHUNKS_DATA.length;
-  document.getElementById("totalEOs").textContent = uniqueEOs;
+    `${CHUNKS_DATA.length} chunks from ${uniqueEOs} Executive Orders`;
 }
 
 function setQuery(query) {
@@ -1012,12 +757,12 @@ function performSearch() {
   }
   
   if (!retriever) {
-    alert("System not initialized. Please reload the page.");
+    alert("System not initialized");
     return;
   }
   
   const resultsContainer = document.getElementById("resultsContainer");
-  resultsContainer.innerHTML = `<div class="loading">🔍 Searching using ${searchMode.toUpperCase()}...</div>`;
+  resultsContainer.innerHTML = `<div class="loading">Searching...</div>`;
   
   setTimeout(() => {
     let results;
@@ -1036,8 +781,8 @@ function displayResults(query, results) {
   if (results.length === 0 || results[0].similarity === 0) {
     resultsContainer.innerHTML = `
       <div class="loading">
-        <h3>No results found for "${query}"</h3>
-        <p>Try different search terms or switch search modes.</p>
+        <h3>No results found</h3>
+        <p>Try different search terms or switch modes</p>
       </div>
     `;
     return;
@@ -1061,46 +806,21 @@ function displayResults(query, results) {
     
     displayText = highlightTerms(displayText, query);
     
-    // Create search-enabled PDF link
-    let titleDisplay;
-    if (doc.pdf_url) {
-      // Extract first ~50 chars for PDF search (clean text, remove special chars)
-      const searchText = (doc.text_original || doc.text || "")
-        .substring(0, 100)
-        .replace(/[^\\w\\s]/g, " ")
-        .trim()
-        .substring(0, 50);
-      
-      // Encode for URL
-      const encodedSearch = encodeURIComponent(searchText);
-      
-      // Build PDF URL with search parameter
-      const pdfLinkWithSearch = `${doc.pdf_url}#search="${encodedSearch}"`;
-      
-      titleDisplay = `<a href="${pdfLinkWithSearch}" target="_blank" title="View PDF and jump to this chunk">#${index + 1}: ${doc.title} 🔗</a>`;
-    } else {
-      titleDisplay = `#${index + 1}: ${doc.title}`;
-    }
+    const titleDisplay = doc.pdf_url 
+      ? `<a href="${doc.pdf_url}" target="_blank">#${index + 1}: ${doc.title}</a>`
+      : `#${index + 1}: ${doc.title}`;
     
     html += `
       <div class="result-card">
         <div class="result-header">
           <div class="result-title">${titleDisplay}</div>
-          <div class="similarity-badge">${simPct}% match</div>
+          <div class="similarity-badge">${simPct}%</div>
         </div>
         <div class="metadata">
-          <div class="metadata-item">
-            <strong>EO Number:</strong> ${doc.eo_number}
-          </div>
-          <div class="metadata-item">
-            <strong>Date:</strong> ${date}
-          </div>
-          <div class="metadata-item">
-            <strong>Chunk:</strong> ${doc.chunk_id}
-          </div>
-          <div class="metadata-item">
-            <strong>Words:</strong> ${doc.word_count}
-          </div>
+          <div class="metadata-item"><strong>EO:</strong> ${doc.eo_number}</div>
+          <div class="metadata-item"><strong>Date:</strong> ${date}</div>
+          <div class="metadata-item"><strong>Chunk:</strong> ${doc.chunk_id}</div>
+          <div class="metadata-item"><strong>Words:</strong> ${doc.word_count}</div>
         </div>
         <div class="chunk-text">${displayText}</div>
       </div>
@@ -1118,46 +838,13 @@ window.addEventListener("DOMContentLoaded", initializeApp);
 close(html_conn)
 
 file_size <- file.size(html_file) / 1024 / 1024
-cat(glue("SUCCESS: Generated {html_file} ({round(file_size, 2)} MB)\n\n"))
-# ============================================================================
-# SUMMARY
-# ============================================================================
+cat(glue("Generated {html_file} ({round(file_size, 2)} MB)\n\n"))
 
 date_range <- range(chunks_final$signing_date, na.rm = TRUE)
 
 cat(strrep("=", 70), "\n")
-cat("SUCCESS: PIPELINE COMPLETE!\n")
+cat("COMPLETE\n")
 cat(strrep("=", 70), "\n\n")
-
-cat("Summary:\n")
-cat(glue("  Executive Orders: {n_distinct(chunks_final$eo_number)}\n"))
-cat(glue("  Total chunks: {nrow(chunks_final)}\n"))
-cat(glue("  Date range: {date_range[1]} to {date_range[2]}\n"))
-cat(glue("  Average chunk size: {round(mean(chunks_final$word_count))} words\n\n"))
-
-cat("Output Files:\n")
-cat("  1. eo_chunks_final.csv (data file for reference)\n")
-cat(glue("  2. EO_Retrieval_System.html ({round(file_size, 2)} MB) <- SUBMIT THIS!\n\n"))
-
-cat("Next Steps:\n")
-cat("  1. Open EO_Retrieval_System.html in your browser\n")
-cat("  2. Test with sample queries:\n")
-cat("     - immigration policy\n")
-cat("     - energy subsidies\n")
-cat("     - federal government\n")
-cat("  3. Verify it works offline (no internet needed)\n")
-cat("  4. Submit to Canvas!\n\n")
-
-cat("Console Testing:\n")
-cat("  You can also test the retrieval in R:\n")
-cat("  retrieve_chunks('your query here')\n\n")
-
-cat(strrep("=", 70), "\n")
-cat("Assignment Requirements Met:\n")
-cat("  [X] TF-IDF implementation (using text2vec)\n")
-cat("  [X] Cosine similarity ranking\n")
-cat("  [X] Returns top 3 results\n")
-cat("  [X] Self-contained (no server needed)\n")
-cat("  [X] Interactive query interface\n")
-cat("  [X] Displays similarity scores\n")
-cat(strrep("=", 70), "\n\n")
+cat(glue("Chunks: {nrow(chunks_final)} from {n_distinct(chunks_final$eo_number)} EOs\n"))
+cat(glue("Date range: {date_range[1]} to {date_range[2]}\n"))
+cat(glue("Output: {html_file}\n\n"))
