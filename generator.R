@@ -1,3 +1,14 @@
+### Academic integrity statement - I very much flew on the wings of modern LLMs to achieve the assignment objectives.
+### My goal was to use R to accomplish the document retrieval, cleaning, chunking, and TF-IDF vectorization tasks. I wanted a single
+### R script that would drive the pipeline from end-to-end. I also wanted a front-end that could be completely self contained in one
+### transmittable HTML file. I worked with Claude/GPT-5 to get a fully working prototype. I then went back and worked to understand
+### all of the code and how it operated. I liberally commented throughout the code to explain my understanding of how the various pieces
+### work. I refamiliarized myself on topics from the text-as-data course to include tokenization, dfms, tf-idf, and cosine similarity. One
+### nice thing is that if we pulled the original assignment spreadsheet on a daily CRONJOB this system could theoretically keep itself
+### current... well until the size of the corpus broke the data injection step in the HTML/JavaScript front-end. I still have a tremendous
+### amount to learn about javascript and CSS but see its immense power. I also used VSCode and GitHub for the first time and learned 
+### a lot about those tools throughout this first assignment.
+
 suppressPackageStartupMessages({
   library(tidyverse)
   library(pdftools)
@@ -302,43 +313,41 @@ tfidf_model <- TfIdf$new()
 ### Fit the TF-IDF model on the DTM and return a new matrix of TF-IDF-weighted values
 dtm_tfidf <- tfidf_model$fit_transform(dtm)
 
+### Need to pack up the final dataframe and export it to json so I can infuse it into the HTML/JavaScript UI
 export_data <- chunks_final %>%
   left_join(meta %>% select(executive_order_number, pdf_url),
             by = c("eo_number" = "executive_order_number")) %>%
+### Convert signing_date to character for JSON compatibility
   mutate(signing_date = as.character(signing_date)) %>%
   select(doc_id, eo_number, chunk_id, title, signing_date, 
          text_original, text, word_count, token_count, pdf_url)
 
+### auto_unbox ensures that single values are not wrapped in arrays, pretty = FALSE minimizes whitespace
 json_data <- toJSON(export_data, auto_unbox = TRUE, pretty = FALSE)
+### Base64 encode the JSON data for embedding into HTML/JavaScript
 json_base64 <- base64enc::base64encode(charToRaw(json_data))
 
-### Export TF-IDF vectors and vocabulary for JavaScript to use
+### Convert from sparse text2vec matrix to dense base R matrix so JavaScript can consume it - could be too memory intensive but works in this use case
 tfidf_matrix <- as.matrix(dtm_tfidf)
+### Extract vocabulary terms in the same order as columns in the TF-IDF matrix
 vocab_terms <- colnames(tfidf_matrix)
 
-### Better IDF extraction
-idf_vector <- tfidf_model$idf
-names(idf_vector) <- vocab_terms
-
-### Export TF-IDF vectors and vocabulary for JavaScript to use
-tfidf_matrix <- as.matrix(dtm_tfidf)
-vocab_terms <- colnames(tfidf_matrix)
-
-### Calculate IDF scores from the DTM (since tfidf_model doesn't expose them directly)
+### Calculate IDF scores from the DTM (scores lost when we did away with the sparse matrix)
 ### IDF = log(total_docs / docs_containing_term)
 dtm_binary <- as.matrix(dtm > 0)  # Convert to binary (term present or not)
 doc_freq <- colSums(dtm_binary)   # Count docs containing each term
-num_docs <- nrow(dtm)
-idf_scores <- log(num_docs / doc_freq)
-names(idf_scores) <- vocab_terms
+num_docs <- nrow(dtm) # Total number of chunks/documents
+idf_scores <- log(num_docs / doc_freq) # Terms that appear in many documents get lower scores
+names(idf_scores) <- vocab_terms # Yields named numeric... we have about 13,000 terms each with their IDF score
 
 ### Create a list structure that JavaScript can use
 tfidf_export <- list(
   vocabulary = vocab_terms,
   idf_scores = as.list(idf_scores),
+### Get the TF-IDF for each term in each document/chunk defined as TF * IDF
   doc_vectors = lapply(seq_len(nrow(tfidf_matrix)), function(i) {
     row <- tfidf_matrix[i, ]
-    ### Only export non-zero values to reduce size
+    ### Only export non-zero values to reduce size and not blow the .html file up
     non_zero <- which(row != 0)
     if (length(non_zero) == 0) return(list())
     setNames(as.list(row[non_zero]), vocab_terms[non_zero])
@@ -347,6 +356,7 @@ tfidf_export <- list(
 
 ### Convert to JSON and base64 encode
 tfidf_json <- toJSON(tfidf_export, auto_unbox = TRUE, pretty = FALSE)
+### Need to convert the JSON load into one of 64 characters A-Z, a-z, 0-9, +, / so we don't break HTML/JS
 tfidf_base64 <- base64enc::base64encode(charToRaw(tfidf_json))
 html_file <- "EO_Retrieval_System.html"
 html_conn <- file(html_file, "w", encoding = "UTF-8")
@@ -358,6 +368,7 @@ writeLines('<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Executive Orders Retrieval System</title>
 <style>
+/* Going to skip through the CSS since it is cosmetic and wont get to core of how the system is working */
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -634,6 +645,10 @@ body {
 <div class="container">
 <div class="header">
   <h1>Executive Orders Retrieval System</h1>
+  <!-- Page title and dynamic status line.
+     The <h1> is static, but the <p id="dataset-info"> text is replaced
+     by JavaScript once the Base64-encoded TF-IDF data is loaded.
+     Initial content ("Loading...") is a placeholder shown before JS initializes. -->
   <p id="dataset-info">Loading...</p>
 </div>
 <div class="search-box">
@@ -641,7 +656,7 @@ body {
     <span class="toggle-label">Search Mode:</span>
     <div id="toggleSwitch" class="toggle-switch" onclick="toggleSearchMode()"></div>
     <span class="mode-indicator" id="modeIndicator">TF-IDF</span>
-    <span class="mode-description" id="modeDescription">(Semantic similarity)</span>
+    <span class="mode-description" id="modeDescription">(Cosine similarity)</span>
   </div>
   <div class="search-input-group">
     <input type="text" id="searchInput" class="search-input" 
@@ -653,16 +668,20 @@ body {
     <span class="example-query" onclick="setQuery(\'immigration policy\')">immigration policy</span>
     <span class="example-query" onclick="setQuery(\'energy subsidies\')">energy subsidies</span>
     <span class="example-query" onclick="setQuery(\'federal government\')">federal government</span>
-    <span class="example-query" onclick="setQuery(\'tax credits\')">tax credits</span>
   </div>
 </div>
 <div id="resultsContainer"></div>
 </div>
 <script>', html_conn)
-
+// R data objects injected into JavaScript as Base64-encoded strings
 writeLines(glue('const CHUNKS_DATA_BASE64 = "{json_base64}";
 const TFIDF_DATA_BASE64 = "{tfidf_base64}";'), html_conn)
 
+// Data has become a JavaScript variable at this point and is safe for use in runtime environment. Transferring back to JSON.
+// JavaScript tokenizer will operate on the users query preparing it for TF-IDF vectorization
+// JavaScript will determine the query TF-IDF and then multiply that against each chunk TF-IDF vector to get cosine similarity scores
+// Top three cosine similarity scores win
+// Keyword search mode thrown in for fun - no R or text2vec involvement there
 writeLines('
 function loadData() {
   try {
