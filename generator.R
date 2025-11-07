@@ -113,6 +113,15 @@ extract_pdf_text <- function(eo_number, pdf_url) {
   TRUE
 }
 
+### Execute the download procedure if needed
+
+invisible(lapply(seq_len(nrow(meta)), function(i) {
+  extract_pdf_text(
+    eo_number = meta$executive_order_number[i],
+    pdf_url   = meta$pdf_url[i]
+  )
+}))
+
 clean_text <- function(raw_text) {
   text <- raw_text
   text <- fix_mojibake(text)
@@ -153,6 +162,25 @@ clean_text <- function(raw_text) {
   
   fix_mojibake(text)
 }
+
+### Execute the cleaning procedure if needed
+
+raw_files <- list.files(
+  "executive_orders_txt",
+  pattern = "\\.txt$",
+  full.names = TRUE
+)
+
+invisible(lapply(raw_files, function(f) {
+  raw <- readr::read_file(f)
+  cleaned <- clean_text(raw)
+  
+  out_name <- gsub("\\.txt$", "_cleaned.txt", basename(f))
+  out_path <- file.path("executive_orders_cleaned", out_name)
+  
+  readr::write_file(cleaned, out_path)
+}))
+
 
 chunk_document <- function(text_original, eo_number) {
   text_cleaned <- str_to_lower(text_original)
