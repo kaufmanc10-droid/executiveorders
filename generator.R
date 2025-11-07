@@ -274,6 +274,8 @@ for (i in seq_along(cleaned_files)) {
 
 chunks_df <- bind_rows(chunks_list)
 
+### Hook chunks back up to the original assignment dataframe
+
 chunks_final <- chunks_df %>%
   left_join(meta %>% select(executive_order_number, title, signing_date),
             by = c("eo_number" = "executive_order_number")) %>%
@@ -284,48 +286,21 @@ chunks_final <- chunks_df %>%
 
 write_csv(chunks_final, "eo_chunks_final.csv")
 
+
+### Mine tokens from each chunk
 tokens <- word_tokenizer(chunks_final$text)
+### text2vec enables us to use the itoken function to feed downstream functions one chunk at a time instead of everything at once improving memory use
 it <- itoken(tokens, progressbar = FALSE)
+### vocabulary df contains the term, number of times in the whole corpus, number of chunks containing term, and number of words in the token
 vocab <- create_vocabulary(it)
+### text2vec builds function necessary for DFM creation
 vectorizer <- vocab_vectorizer(vocab)
+### text2vec builds DFM
 dtm <- create_dtm(it, vectorizer)
+### text2vec creates a TF-IDF transformer that will convert raw term counts into weighted importance scores
 tfidf_model <- TfIdf$new()
+### Fit the TF-IDF model on the DTM and return a new matrix of TF-IDF-weighted values
 dtm_tfidf <- tfidf_model$fit_transform(dtm)
-
-cat(glue("Index built ({nrow(dtm_tfidf)} chunks x {ncol(dtm_tfidf)} terms)\n\n"))
-
-retrieve_chunks <- function(query, top_n = 3) {
-  if (!nzchar(query)) {
-    cat("Empty query.\n")
-    return(invisible(NULL))
-  }
-  
-  q_tokens <- word_tokenizer(tolower(query))
-  q_it <- itoken(q_tokens, progressbar = FALSE)
-  q_dtm <- create_dtm(q_it, vectorizer)
-  q_tfidf <- transform(q_dtm, tfidf_model)
-  
-  similarities <- sim2(dtm_tfidf, q_tfidf, method = "cosine", norm = "l2")
-  top_indices <- order(similarities[, 1], decreasing = TRUE)[1:min(top_n, nrow(chunks_final))]
-  
-  results <- chunks_final[top_indices, ] %>%
-    mutate(similarity = round(similarities[top_indices, 1] * 100, 1))
-  
-  cat(glue('\nTop {nrow(results)} results for: "{query}"\n\n'))
-  
-  for (i in 1:nrow(results)) {
-    r <- results[i, ]
-    cat(glue("[{i}] EO {r$eo_number}: {r$title}\n"))
-    cat(glue("    Date: {r$signing_date} | Similarity: {r$similarity}%\n"))
-    cat(glue("    Preview: {str_sub(r$text_original, 1, 200)}...\n\n"))
-  }
-  
-  invisible(results)
-}
-
-cat("Console retrieval ready: retrieve_chunks('your query')\n\n")
-
-cat("Step 7: Generating HTML...\n")
 
 export_data <- chunks_final %>%
   left_join(meta %>% select(executive_order_number, pdf_url),
@@ -337,6 +312,42 @@ export_data <- chunks_final %>%
 json_data <- toJSON(export_data, auto_unbox = TRUE, pretty = FALSE)
 json_base64 <- base64enc::base64encode(charToRaw(json_data))
 
+### Export TF-IDF vectors and vocabulary for JavaScript to use
+tfidf_matrix <- as.matrix(dtm_tfidf)
+vocab_terms <- colnames(tfidf_matrix)
+
+### Better IDF extraction
+idf_vector <- tfidf_model$idf
+names(idf_vector) <- vocab_terms
+
+### Export TF-IDF vectors and vocabulary for JavaScript to use
+tfidf_matrix <- as.matrix(dtm_tfidf)
+vocab_terms <- colnames(tfidf_matrix)
+
+### Calculate IDF scores from the DTM (since tfidf_model doesn't expose them directly)
+### IDF = log(total_docs / docs_containing_term)
+dtm_binary <- as.matrix(dtm > 0)  # Convert to binary (term present or not)
+doc_freq <- colSums(dtm_binary)   # Count docs containing each term
+num_docs <- nrow(dtm)
+idf_scores <- log(num_docs / doc_freq)
+names(idf_scores) <- vocab_terms
+
+### Create a list structure that JavaScript can use
+tfidf_export <- list(
+  vocabulary = vocab_terms,
+  idf_scores = as.list(idf_scores),
+  doc_vectors = lapply(seq_len(nrow(tfidf_matrix)), function(i) {
+    row <- tfidf_matrix[i, ]
+    ### Only export non-zero values to reduce size
+    non_zero <- which(row != 0)
+    if (length(non_zero) == 0) return(list())
+    setNames(as.list(row[non_zero]), vocab_terms[non_zero])
+  })
+)
+
+### Convert to JSON and base64 encode
+tfidf_json <- toJSON(tfidf_export, auto_unbox = TRUE, pretty = FALSE)
+tfidf_base64 <- base64enc::base64encode(charToRaw(tfidf_json))
 html_file <- "EO_Retrieval_System.html"
 html_conn <- file(html_file, "w", encoding = "UTF-8")
 
@@ -349,49 +360,99 @@ writeLines('<!DOCTYPE html>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f1f1f1;
   min-height: 100vh;
-  padding: 20px;
+  padding: 0;
+  color: #212121;
 }
-.container { max-width: 1200px; margin: 0 auto; }
-.header {
+.gov-banner {
+  background: #f0f0f0;
+  border-bottom: 1px solid #d6d7d9;
+  padding: 8px 0;
+  font-size: 0.85em;
+}
+.gov-banner .container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 20px;
+  color: #5b616b;
+}
+.site-header {
+  background: #112e51;
+  color: white;
+  padding: 20px 0;
+  border-bottom: 3px solid #0071bc;
+}
+.site-header .container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.site-title {
+  font-size: 1.8em;
+  font-weight: 700;
+  color: white;
+}
+.site-subtitle {
+  font-size: 0.9em;
+  color: #aeb0b5;
+  margin-top: 2px;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+.content-area {
+  padding: 40px 0;
+}
+.page-header {
   background: white;
-  padding: 40px;
-  border-radius: 15px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+  padding: 30px 40px;
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
   margin-bottom: 30px;
-  text-align: center;
+  border-left: 4px solid #0071bc;
 }
-.header h1 { color: #667eea; font-size: 2.5em; margin-bottom: 10px; }
-.header p { color: #666; font-size: 1.1em; }
+.page-header h1 { 
+  color: #112e51; 
+  font-size: 2.2em; 
+  margin-bottom: 8px;
+  font-weight: 700;
+}
+.page-header p { color: #5b616b; font-size: 1.05em; line-height: 1.5; }
 .search-box {
   background: white;
-  padding: 30px;
-  border-radius: 15px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+  padding: 30px 40px;
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
   margin-bottom: 30px;
 }
 .toggle-container {
   display: flex;
   align-items: center;
   gap: 15px;
-  margin-bottom: 20px;
-  padding: 15px;
-  background: #f8f9fa;
-  border-radius: 8px;
+  margin-bottom: 25px;
+  padding: 18px;
+  background: #f9f9f9;
+  border-radius: 3px;
+  border: 1px solid #d6d7d9;
 }
-.toggle-label { font-weight: 600; color: #333; font-size: 1.1em; }
+.toggle-label { 
+  font-weight: 600; 
+  color: #112e51; 
+  font-size: 1.05em; 
+}
 .toggle-switch {
   position: relative;
   width: 60px;
   height: 30px;
-  background: #ccc;
+  background: #aeb0b5;
   border-radius: 15px;
   cursor: pointer;
   transition: background 0.3s;
 }
-.toggle-switch.active { background: #667eea; }
+.toggle-switch.active { background: #0071bc; }
 .toggle-switch::after {
   content: "";
   position: absolute;
@@ -402,116 +463,170 @@ body {
   background: white;
   border-radius: 50%;
   transition: transform 0.3s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
 }
 .toggle-switch.active::after { transform: translateX(30px); }
-.mode-indicator { font-size: 1.1em; color: #667eea; font-weight: 600; }
-.mode-description { font-size: 0.9em; color: #666; font-style: italic; }
-.search-input-group { display: flex; gap: 10px; }
+.mode-indicator { 
+  font-size: 1.05em; 
+  color: #0071bc; 
+  font-weight: 700; 
+}
+.mode-description { 
+  font-size: 0.9em; 
+  color: #5b616b; 
+  font-style: italic; 
+}
+.search-input-group { 
+  display: flex; 
+  gap: 12px; 
+  margin-bottom: 20px;
+}
 .search-input {
   flex: 1;
-  padding: 15px;
+  padding: 14px 16px;
   font-size: 16px;
-  border: 2px solid #ddd;
-  border-radius: 8px;
-  transition: border-color 0.3s;
+  border: 1px solid #aeb0b5;
+  border-radius: 3px;
+  transition: border-color 0.3s, box-shadow 0.3s;
+  font-family: inherit;
 }
-.search-input:focus { outline: none; border-color: #667eea; }
+.search-input:focus { 
+  outline: none; 
+  border-color: #0071bc; 
+  box-shadow: 0 0 0 2px rgba(0, 113, 188, 0.2);
+}
 .search-button {
-  padding: 15px 40px;
-  background: #667eea;
+  padding: 14px 32px;
+  background: #0071bc;
   color: white;
   border: none;
-  border-radius: 8px;
+  border-radius: 3px;
   font-size: 16px;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
   transition: background 0.3s;
+  font-family: inherit;
 }
-.search-button:hover { background: #5568d3; }
+.search-button:hover { background: #205493; }
+.search-button:active { background: #112e51; }
 .example-queries {
-  background: #f8f9fa;
-  padding: 15px;
-  border-radius: 8px;
-  margin-top: 15px;
+  background: #f9f9f9;
+  padding: 16px;
+  border-radius: 3px;
+  border: 1px solid #d6d7d9;
+}
+.example-queries-label {
+  font-size: 0.9em;
+  color: #5b616b;
+  margin-bottom: 8px;
+  font-weight: 600;
 }
 .example-query {
   display: inline-block;
   background: white;
-  padding: 5px 12px;
-  border-radius: 15px;
-  margin: 5px;
+  padding: 6px 14px;
+  border-radius: 3px;
+  margin: 4px;
   cursor: pointer;
-  border: 1px solid #ddd;
-  transition: all 0.3s;
+  border: 1px solid #aeb0b5;
+  transition: all 0.2s;
   font-size: 0.9em;
+  color: #0071bc;
+  font-weight: 600;
 }
 .example-query:hover {
-  background: #667eea;
+  background: #0071bc;
   color: white;
-  border-color: #667eea;
+  border-color: #0071bc;
 }
 .result-card {
   background: white;
-  padding: 30px;
-  margin-bottom: 15px;
-  border-radius: 10px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+  padding: 32px;
+  margin-bottom: 20px;
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  border-left: 4px solid #0071bc;
 }
 .result-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 15px;
-  padding-bottom: 15px;
-  border-bottom: 2px solid #f0f0f0;
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #d6d7d9;
 }
 .result-title {
-  font-size: 1.4em;
-  color: #333;
-  font-weight: 600;
+  font-size: 1.35em;
+  color: #112e51;
+  font-weight: 700;
   flex: 1;
+  line-height: 1.4;
 }
-.result-title a { color: #333; text-decoration: none; transition: color 0.3s; }
-.result-title a:hover { color: #667eea; text-decoration: underline; }
+.result-title a { 
+  color: #0071bc; 
+  text-decoration: underline; 
+  transition: color 0.2s; 
+}
+.result-title a:hover { 
+  color: #205493; 
+}
 .similarity-badge {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #0071bc;
   color: white;
-  padding: 8px 16px;
-  border-radius: 20px;
-  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 3px;
+  font-weight: 700;
   font-size: 0.9em;
   white-space: nowrap;
   margin-left: 20px;
 }
 .metadata {
   display: flex;
-  gap: 20px;
+  gap: 24px;
   margin-bottom: 20px;
   flex-wrap: wrap;
-  color: #666;
+  color: #5b616b;
+  font-size: 0.9em;
+}
+.metadata-item { 
+  display: flex; 
+  gap: 6px; 
+}
+.metadata-item strong { 
+  color: #112e51; 
+  font-weight: 700;
+}
+.chunk-text {
+  background: #f9f9f9;
+  padding: 20px;
+  border-radius: 3px;
+  line-height: 1.7;
+  color: #212121;
+  border: 1px solid #d6d7d9;
   font-size: 0.95em;
 }
-.metadata-item strong { color: #333; }
-.chunk-text {
-  background: #f8f9fa;
-  padding: 20px;
-  border-radius: 8px;
-  line-height: 1.8;
-  color: #444;
-  border-left: 4px solid #667eea;
-}
 .highlight { 
-  background: #fff59d; 
+  background: #fdb81e; 
   padding: 2px 4px;
-  border-radius: 3px;
-  font-weight: 500;
+  border-radius: 2px;
+  font-weight: 600;
+  color: #212121;
 }
 .loading {
   text-align: center;
-  padding: 40px;
+  padding: 50px;
   background: white;
-  border-radius: 15px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.loading h3 {
+  color: #112e51;
+  font-size: 1.4em;
+  margin-bottom: 10px;
+}
+.loading p {
+  color: #5b616b;
+  font-size: 1.05em;
 }
 </style>
 </head>
@@ -545,7 +660,8 @@ body {
 </div>
 <script>', html_conn)
 
-writeLines(glue('const CHUNKS_DATA_BASE64 = "{json_base64}";'), html_conn)
+writeLines(glue('const CHUNKS_DATA_BASE64 = "{json_base64}";
+const TFIDF_DATA_BASE64 = "{tfidf_base64}";'), html_conn)
 
 writeLines('
 function loadData() {
@@ -562,12 +678,11 @@ const CHUNKS_DATA = loadData();
 let searchMode = "tfidf";
 
 class TfIdfRetriever {
-  constructor(documents) {
+  constructor(documents, precomputedTfidf) {
     this.documents = documents;
-    this.vocabulary = new Set();
-    this.idf = {};
-    this.tfidfVectors = [];
-    this.buildIndex();
+    this.vocabulary = new Set(precomputedTfidf.vocabulary);
+    this.idf = precomputedTfidf.idf_scores;
+    this.tfidfVectors = precomputedTfidf.doc_vectors;
   }
   
   tokenize(text) {
@@ -575,41 +690,6 @@ class TfIdfRetriever {
       .replace(/[^\\w\\s]/g, " ")
       .split(/\\s+/)
       .filter(token => token.length > 2);
-  }
-  
-  buildIndex() {
-    const docFrequency = {};
-    
-    this.documents.forEach(doc => {
-      const tokens = this.tokenize(doc.text);
-      const uniqueTokens = new Set(tokens);
-      
-      uniqueTokens.forEach(token => {
-        this.vocabulary.add(token);
-        docFrequency[token] = (docFrequency[token] || 0) + 1;
-      });
-    });
-    
-    const numDocs = this.documents.length;
-    for (const term of this.vocabulary) {
-      this.idf[term] = Math.log(numDocs / (docFrequency[term] || 1));
-    }
-    
-    this.documents.forEach(doc => {
-      const tokens = this.tokenize(doc.text);
-      const tf = {};
-      
-      tokens.forEach(token => {
-        tf[token] = (tf[token] || 0) + 1;
-      });
-      
-      const tfidf = {};
-      for (const term in tf) {
-        tfidf[term] = tf[term] * (this.idf[term] || 0);
-      }
-      
-      this.tfidfVectors.push(tfidf);
-    });
   }
   
   cosineSimilarity(vec1, vec2) {
@@ -747,11 +827,22 @@ function initializeApp() {
     return;
   }
   
-  retriever = new TfIdfRetriever(CHUNKS_DATA);
+  // Load precomputed TF-IDF data
+  let tfidfData;
+  try {
+    const tfidfStr = atob(TFIDF_DATA_BASE64);
+    tfidfData = JSON.parse(tfidfStr);
+  } catch(e) {
+    console.error("Failed to load TF-IDF data:", e);
+    document.getElementById("dataset-info").textContent = "ERROR: Failed to load TF-IDF model";
+    return;
+  }
+  
+  retriever = new TfIdfRetriever(CHUNKS_DATA, tfidfData);
   
   const uniqueEOs = new Set(CHUNKS_DATA.map(c => c.eo_number)).size;
   document.getElementById("dataset-info").textContent = 
-    `${CHUNKS_DATA.length} chunks from ${uniqueEOs} Executive Orders`;
+    `${CHUNKS_DATA.length} chunks from ${uniqueEOs} Executive Orders (using R text2vec TF-IDF)`;
 }
 
 function setQuery(query) {
@@ -847,4 +938,3 @@ window.addEventListener("DOMContentLoaded", initializeApp);
 </html>', html_conn)
 
 close(html_conn)
-
