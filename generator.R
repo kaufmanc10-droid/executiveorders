@@ -859,6 +859,7 @@ function initializeApp() {
   
   retriever = new TfIdfRetriever(CHUNKS_DATA, tfidfData);
   
+  
   const uniqueEOs = new Set(CHUNKS_DATA.map(c => c.eo_number)).size;
   document.getElementById("dataset-info").textContent = 
     `${CHUNKS_DATA.length} chunks from ${uniqueEOs} Executive Orders (using R text2vec TF-IDF)`;
